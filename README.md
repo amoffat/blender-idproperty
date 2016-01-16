@@ -55,6 +55,15 @@ except:
 register()
 ```
 
+# Installation
+
+1. Click "Download Zip" on Github.
+2. Save the zip somewhere.
+3. From Blender, visit File -> User Preferences.
+4. Go to Add-ons.
+5. Click "Install from File..."
+6. Select the zip file that you saved.
+
 # How does it work?
 
 The first step to enabling this functionality was the establishment of unique ids per object, and doing our best to enforce their uniqueness.  By having unique ids that don't change, it means that a Property can point to something other than the object's name, and is therefore resilient to the object's name changing.  Unique ids are implemented through a scene-level unique id counter.  An object initially starts out with no set `.id` field, but when it is fetched, we use the value from the scene unique id counter, then increment the counter.  In fact, these counters are incremented and kept in sync across *all* scenes, so that objects shared between scenes will never have an id collision.

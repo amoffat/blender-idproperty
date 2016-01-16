@@ -39,7 +39,7 @@ from bpy import props as p
 
 
 bl_info = {
-    "name": "ID Properties",
+    "name": "IDProperty",
     "description": "Provides a new property type that allows you to point a \
 property to another object, even if that object changes its name.",
     "category": "Object",
@@ -84,17 +84,6 @@ def layout_id_prop(layout, data, prop):
 
     layout.prop(data, prop, icon="OBJECT_DATA")
 
-
-
-def resolve_ob_name(name):
-    lib = None
-
-    if "." in name:
-        parts = name.split(".")
-        lib_name = parts[0]
-        rest = ".".join(parts[1:])
-
-        lib = bpy.data.libraries.get(lib_name, None)
 
 
 def _create_global_id_getter(field):
