@@ -86,66 +86,59 @@ def layout_id_prop(layout, data, prop):
 
 
 
-def _create_global_id_getter(field):
-    def fn():
-        """ internal helper for getting the true unique counter id by looking
-        at all scenes and picking the highest value """
-        scenes = list(bpy.data.scenes)
-        scenes.sort(key=lambda s: getattr(s, field), reverse=True)
-        max_id = getattr(scenes[0], field)
-        return max_id
-    return fn
+def _get_global_id(field):
+    """ internal helper for getting the true unique counter id by looking
+    at all scenes and picking the highest value """
+    field += "_id_counter"
+    scenes = list(bpy.data.scenes)
+    scenes.sort(key=lambda s: getattr(s, field), reverse=True)
+    max_id = getattr(scenes[0], field)
+    return max_id
 
-def _create_global_id_inc(field):
-    def fn(old_max_id):
-        """ internal helper for incrementing the unique object counter id by making
-        sure that all scenes have the same value """
-        new_id = old_max_id + 1
-        for scene in bpy.data.scenes:
-            setattr(scene, field, new_id)
-        return new_id
-    return fn
+def _inc_global_id(field, old_max_id):
+    """ internal helper for incrementing the unique object counter id by making
+    sure that all scenes have the same value """
+    field += "_id_counter"
+    new_id = old_max_id + 1
+    for scene in bpy.data.scenes:
+        setattr(scene, field, new_id)
+    return new_id
 
 
-_get_global_ob_id = _create_global_id_getter("ob_id_counter")
-_get_global_lib_id = _create_global_id_getter("lib_id_counter")
-_inc_global_ob_id = _create_global_id_inc("ob_id_counter")
-_inc_global_lib_id = _create_global_id_inc("lib_id_counter")
-
-
-def _resolve_id_conflicts(scene, conflicts):
+def _resolve_id_conflicts(field, scene, conflicts):
     """ a utility function, used internally, to resolve id conflicts arising
     from object duplication.  we return the "correct" object and mutate all of
     the incorrect objects to have unique ids """
 
     resolved = conflicts[0]
-    max_id = _get_global_ob_id()
+    max_id = _get_global_id(field)
     for ob in conflicts[1:]:
         ob["id"] = max_id
-        max_id = _inc_global_ob_id(max_id)
+        max_id = _inc_global_id(field, max_id)
 
     return resolved
 
 
-def get_object_by_id(id):
+def get_by_id(data_field, id):
     """ find an object by id.  this is slow, in that we have to iterate over
     every object in order to resolve conflicts introduced by duplicating
     objects.  but in practice, it's not that slow.  testing with 10000 objects,
     evaluation time was only about 0.01s """
 
     scene = bpy.context.scene
+    data = getattr(bpy.data, data_field)
 
     have_same_id = []
-    for ob in bpy.data.objects:
-        if ob.id == id:
-            have_same_id.append(ob)
+    for thing in data:
+        if thing.id == id:
+            have_same_id.append(thing)
 
     resolved = None
 
     # if we have conflicts, we need to adjust the ids of the conflicting
     # objects
     if have_same_id:
-        resolved = _resolve_id_conflicts(scene, have_same_id)
+        resolved = _resolve_id_conflicts(data_field, scene, have_same_id)
 
     return resolved
 
@@ -155,9 +148,9 @@ def get_ob_id(self):
     don't have one, we generate one and increment the Scene.id_counter """
     id = self.get("id", None)
     if id is None:
-        id = _get_global_ob_id()
+        id = _get_global_id("objects")
         self["id"] = id
-        _inc_global_ob_id(id)
+        _inc_global_id("objects", id)
 
     # if our object lives in another blend file, and has been linked into this
     # file, we're going to offset all of its ids by some amount
@@ -168,25 +161,29 @@ def get_ob_id(self):
     return id + lib_offset
 
 
-def get_lib_id(self):
-    id = self.get("id", None)
-    if id is None:
-        id = _get_global_lib_id()
-        self["id"] = id
-        _inc_global_lib_id(id)
 
-    return id
+def _create_id_getter(field):
+    def fn(self):
+        id = self.get("id", None)
+        if id is None:
+            id = _get_global_id(field)
+            self["id"] = id
+            _inc_global_id(field, id)
+        return id
+    return fn
 
 
 def _create_value_key(name):
     return name + "_id"
 
 
-def create_getter(value_key):
+def create_getter(data_field, value_key):
     """ this getter for IDProperty handles resolving the lookup from unique id
     to object name.  we also take into account the special values of None
     (meaning the id was never set or has been unset), and -1 (meaning the
     reference has been broken) """
+
+    data = getattr(bpy.data, data_field)
 
     def fn(self):
         name = ""
@@ -197,7 +194,7 @@ def create_getter(value_key):
             name = NOT_FOUND
 
         elif ob_id is not None:
-            ob = get_object_by_id(ob_id)
+            ob = get_by_id(data_field, ob_id)
             if ob:
                 name = ob.name
             else:
@@ -209,7 +206,7 @@ def create_getter(value_key):
     return fn
 
 
-def create_setter(value_key, validator=None):
+def create_setter(data_field, value_key, validator=None):
     """ this setter for IDProperty handles taking an object name, determining if
     it points to a valid object, then setting our property to that object's
     unique id.  we also accept a validator function which returns a boolean
@@ -219,12 +216,14 @@ def create_setter(value_key, validator=None):
     validator function would then check for that red material and return the
     appropriate boolean """
 
+    data = getattr(bpy.data, data_field)
+
     def fn(self, value):
         if value == "":
             del self[value_key]
 
         else:
-            ob = bpy.data.objects.get(value, None)
+            ob = data.get(value, None)
             if ob:
                 valid = True
                 if validator:
@@ -236,28 +235,42 @@ def create_setter(value_key, validator=None):
     return fn
 
 
-def IDProperty(*args, **kwargs):
-    """ the main class.  """
-    value_key = _create_value_key(kwargs["name"])
-    validator = kwargs.pop("validator", None)
+def _create_id_property(field_name):
+    def fn(*args, **kwargs):
+        """ the main class.  """
+        value_key = _create_value_key(kwargs["name"])
+        validator = kwargs.pop("validator", None)
 
-    kwargs["get"] = create_getter(value_key)
-    kwargs["set"] = create_setter(value_key, validator)
+        kwargs["get"] = create_getter(field_name, value_key)
+        kwargs["set"] = create_setter(field_name, value_key, validator)
 
-    return p.StringProperty(*args, **kwargs)
-    
+        return p.StringProperty(*args, **kwargs)
+    return fn
+
+
+IDProperty = _create_id_property("objects")
+GroupIDProperty = _create_id_property("groups")
+
     
 
 def register():
     bpy.types.Object.id = p.IntProperty(name="unique id", get=get_ob_id)
-    bpy.types.Library.id = p.IntProperty(name="unique id", get=get_lib_id)
-    bpy.types.Scene.ob_id_counter = p.IntProperty(name="unique id counter", default=0)
-    bpy.types.Scene.lib_id_counter = p.IntProperty(name="unique id counter", default=0)
+    bpy.types.Library.id = p.IntProperty(name="unique id",
+            get=_create_id_getter("libraries"))
+    bpy.types.Group.id = p.IntProperty(name="unique id",
+            get=_create_id_getter("groups"))
+    bpy.types.Scene.objects_id_counter = p.IntProperty(name="unique id counter", default=0)
+    bpy.types.Scene.libraries_id_counter = p.IntProperty(name="unique id counter", default=0)
+    bpy.types.Scene.groups_id_counter = p.IntProperty(name="unique id counter", default=0)
 
 
 def unregister():
     del bpy.types.Object.id
-    del bpy.types.Scene.ob_id_counter
+    del bpy.types.Library.id
+    del bpy.types.Group.id
+    del bpy.types.Scene.objects_id_counter
+    del bpy.types.Scene.libraries_id_counter
+    del bpy.types.Scene.groups_id_counter
     
 try:
     unregister()
