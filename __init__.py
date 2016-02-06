@@ -224,23 +224,17 @@ def create_getter(data_field, value_key):
     def fn(self):
         ob_id = self.get(value_key, None)
 
-        ob_hash = ID_TO_HASH[data_field].get(ob_id, None)
+        id_to_hash = ID_TO_HASH[data_field]
+        hash_to_name = HASH_TO_NAME[data_field]
 
-        # has a reference to an object that no longer exists
-        if ob_hash is None:
-            ob = get_by_id(data_field, ob_id)
-            if ob is not None:
-                ob_hash = hash(ob)
-                ID_TO_HASH[data_field][ob_id] = ob_hash
-                HASH_TO_NAME[data_field][ob_hash] = ob.name
-
-        ob_name = HASH_TO_NAME[data_field].get(ob_hash, None)
+        ob_hash = id_to_hash.get(ob_id, None)
+        ob_name = hash_to_name.get(ob_hash, None)
         exists = ob_name is not None and ob_name in data 
 
         if not exists:
             for name, ob in data.items():
                 if ob_hash == hash(ob):
-                    HASH_TO_NAME[data_field][ob_hash] = name
+                    hash_to_name[ob_hash] = name
                     ob_name = name
                     break
 
