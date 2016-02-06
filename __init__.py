@@ -10,15 +10,6 @@ lazily generate the ids -- only at the time of accessing the id attribute will
 the id be created, if it doesn't already exist.  This allows the appearance of
 every object to have an id automatically.
 
-There are conditions that can break the uniqueness of the ids.  If we duplicate
-an object, this code has no way of knowing that the object was duplicated, and
-so the .id property of the duplicate will be identical.  To resolve this, we
-find all conflicting ids whenever an IDProperty is evaluated, and choose the
-first object (as ordered in bpy.data.objects) to be the authentic object.  We
-choose the first, because the duplicated object will have a name similar to
-"name.001".  This assumption is incorrect if the duplicated object is renamed
-before the id conflict is resolved.
-
 Also, if data is linked from one scene to another, the linked object in the new
 scene may have an id that is taken by another object in the scene.  In this
 case, any reference to the id may be incorrect, since we have no way of knowing
@@ -34,8 +25,11 @@ introducing a fast lookup from id -> object.
 
 
 import bpy
+from bpy.app import handlers
 from bpy.utils import register_module, unregister_module
 from bpy import props as p
+from contextlib import contextmanager
+import json
 
 
 bl_info = {
@@ -44,7 +38,7 @@ bl_info = {
 property to another object, even if that object changes its name.",
     "category": "Object",
     "author": "Andrew Moffat",
-    "version": (1, 0),
+    "version": (1, 2),
     "blender": (2, 7, 6)
 }
 
@@ -56,34 +50,113 @@ property to another object, even if that object changes its name.",
 # to help determine an offset to the linked object's id
 LIB_ID_SPACE = 10000000
 
-# text used for when a id property reference is broken
-NOT_FOUND = "<NOT FOUND>"
+ID_TO_HASH = {}
+HASH_TO_NAME = {}
+
+SUPPORTED_COLLECTIONS = (
+    ("objects", "Object"),
+    ("materials", "Material"),
+    ("groups", "Group"),
+    ("libraries", "Library"),
+)
+
+
+class IDPropertyOpMixin(object):
+    bl_label = ""
+    to_populate_data = p.StringProperty()
+    to_populate_field = p.StringProperty()
+
+
+    @property
+    def ob(self):
+        data = eval(self.to_populate_data)
+        ob_name = getattr(data, self.to_populate_field)
+        return bpy.data.objects.get(ob_name)
+
+    @ob.setter
+    def ob(self, new_ob):
+        ob_name = new_ob.name if new_ob else ""
+        data = eval(self.to_populate_data)
+        setattr(data, self.to_populate_field, ob_name)
+
+    @classmethod
+    def poll(self, ctx):
+        return has_active_3d_view()
+
+
+class SelectedToIdProperty(IDPropertyOpMixin, bpy.types.Operator):
+    bl_idname = "idproperty.get_selected"
+
+    def execute(self, ctx):
+        sel = ctx.selected_objects
+        ob = None
+        if len(sel) > 1:
+            ob = sel[0]
+
+        self.ob = ob
+        return {"FINISHED"}
+
+
+class FindSelected(IDPropertyOpMixin, bpy.types.Operator):
+    bl_idname = "idproperty.find_selected"
+
+    def execute(self, ctx):
+        if self.ob:
+            for ob in ctx.scene.objects:
+                ob.select = False
+
+            ctx.scene.objects.active = self.ob
+            self.ob.select = True
+
+            with in_3dview(ctx) as override:
+                bpy.ops.view3d.view_selected(override)
+
+        return {"FINISHED"}
+
+
+def has_active_3d_view():
+    return len(list(all_3d_views())) > 0
+
+def all_3d_views():
+    for area in bpy.context.screen.areas:
+        if area.type == "VIEW_3D":
+            for region in area.regions:
+                if region.type == "WINDOW":
+                    yield (area, region)
+
+
+@contextmanager
+def in_3dview(ctx):
+    try:
+        area, region = list(all_3d_views())[0]
+    except IndexError:
+        raise Exception("no 3d region found")
+
+    override = ctx.copy()
+    override.update({"area": area, "region": region})
+    yield override
+
 
 
 def layout_id_prop(layout, data, prop):
-    """ a convenience function for wiring up any layout to an IDProperty.  this
-    will set an nice icon for the field, as well as handle any alerting of the
-    field based on whether we can find the object the field was pointing to
-
-    instead of doing this:
-        
-        row = layout.row()
-        row.prop(data, prop)
-
-    do this:
-
-        row = layout.row()
-        layout_id_prop(row, data, prop)
-    """
-    # determine if our input should be in the alert state (red) based on whether
-    # or not our reference to the object was broken
-    prop_name = data.bl_rna.properties[prop].name
+    prop_obj = data.bl_rna.properties[prop]
+    prop_name = prop_obj.name
     value_key = _create_value_key(prop_name)
     ref_id = data.get(value_key, None)
-    layout.alert = ref_id == -1
 
-    layout.prop(data, prop, icon="OBJECT_DATA")
+    field_name = json.loads(prop_obj.description)["field_name"]
 
+    row = layout.row(align=True)
+    row.prop_search(data, prop, bpy.data, field_name)
+
+    if field_name == "objects":
+        op_props = row.operator(SelectedToIdProperty.bl_idname, emboss=True, icon="EYEDROPPER")
+        op_props.to_populate_data = repr(data)
+        op_props.to_populate_field = prop
+
+        op_props = row.operator(FindSelected.bl_idname, emboss=True, icon="VIEWZOOM")
+        op_props.to_populate_data = repr(data)
+        op_props.to_populate_field = prop
 
 
 def _get_global_id(field):
@@ -105,71 +178,39 @@ def _inc_global_id(field, old_max_id):
     return new_id
 
 
-def _resolve_id_conflicts(field, scene, conflicts):
-    """ a utility function, used internally, to resolve id conflicts arising
-    from object duplication.  we return the "correct" object and mutate all of
-    the incorrect objects to have unique ids """
-
-    resolved = conflicts[0]
-    max_id = _get_global_id(field)
-    for ob in conflicts[1:]:
-        ob["id"] = max_id
-        max_id = _inc_global_id(field, max_id)
-
-    return resolved
-
 
 def get_by_id(data_field, id):
-    """ find an object by id.  this is slow, in that we have to iterate over
-    every object in order to resolve conflicts introduced by duplicating
-    objects.  but in practice, it's not that slow.  testing with 10000 objects,
-    evaluation time was only about 0.01s """
-
-    scene = bpy.context.scene
     data = getattr(bpy.data, data_field)
 
-    have_same_id = []
-    for thing in data:
-        if thing.id == id:
-            have_same_id.append(thing)
+    id_to_hash = ID_TO_HASH[data_field]
+    hash_to_name = HASH_TO_NAME[data_field]
 
-    resolved = None
+    hash = id_to_hash.get(id, None)
+    ob_name = hash_to_name.get(hash)
 
-    # if we have conflicts, we need to adjust the ids of the conflicting
-    # objects
-    if have_same_id:
-        resolved = _resolve_id_conflicts(data_field, scene, have_same_id)
+    ob = None
+    if ob_name:
+        ob = data.get(ob_name, None)
 
-    return resolved
-
-
-def get_ob_id(self):
-    """ the getter for an Object that returns the object's unique id.  if we
-    don't have one, we generate one and increment the Scene.id_counter """
-    id = self.get("id", None)
-    if id is None:
-        id = _get_global_id("objects")
-        self["id"] = id
-        _inc_global_id("objects", id)
-
-    # if our object lives in another blend file, and has been linked into this
-    # file, we're going to offset all of its ids by some amount
-    lib_offset = 0
-    if self.library:
-        lib_offset = (self.library.id+1) * LIB_ID_SPACE
-
-    return id + lib_offset
+    return ob
 
 
 
 def _create_id_getter(field):
     def fn(self):
-        id = self.get("id", None)
-        if id is None:
+        id = self.get("id", 0)
+        if not id:
             id = _get_global_id(field)
             self["id"] = id
             _inc_global_id(field, id)
-        return id
+
+        # if our object lives in another blend file, and has been linked into this
+        # file, we're going to offset all of its ids by some amount
+        lib_offset = 0
+        if self.library:
+            lib_offset = (self.library.id+1) * LIB_ID_SPACE
+
+        return id + lib_offset
     return fn
 
 
@@ -178,49 +219,44 @@ def _create_value_key(name):
 
 
 def create_getter(data_field, value_key):
-    """ this getter for IDProperty handles resolving the lookup from unique id
-    to object name.  we also take into account the special values of None
-    (meaning the id was never set or has been unset), and -1 (meaning the
-    reference has been broken) """
-
     data = getattr(bpy.data, data_field)
 
     def fn(self):
-        name = ""
         ob_id = self.get(value_key, None)
 
-        # meaning our reference has been broken
-        if ob_id is -1:
-            name = NOT_FOUND
+        ob_hash = ID_TO_HASH[data_field].get(ob_id, None)
 
-        elif ob_id is not None:
+        # has a reference to an object that no longer exists
+        if ob_hash is None:
             ob = get_by_id(data_field, ob_id)
-            if ob:
-                name = ob.name
-            else:
-                name = NOT_FOUND
-                # mark the reference as broken
-                self[value_key] = -1
+            if ob is not None:
+                ob_hash = hash(ob)
+                ID_TO_HASH[data_field][ob_id] = ob_hash
+                HASH_TO_NAME[data_field][ob_hash] = ob.name
 
-        return name
+        ob_name = HASH_TO_NAME[data_field].get(ob_hash, None)
+        exists = ob_name is not None and ob_name in data 
+
+        if not exists:
+            for name, ob in data.items():
+                if ob_hash == hash(ob):
+                    HASH_TO_NAME[data_field][ob_hash] = name
+                    ob_name = name
+                    break
+
+        if ob_name is None:
+            ob_name = ""
+        return ob_name
     return fn
 
 
-def create_setter(data_field, value_key, validator=None):
-    """ this setter for IDProperty handles taking an object name, determining if
-    it points to a valid object, then setting our property to that object's
-    unique id.  we also accept a validator function which returns a boolean
-    representing whether or not this object is valid to be used as a reference.
-    a use-case for the validator might be that you only want the object with an
-    IDProperty to accept references to objects that have a red material.  your
-    validator function would then check for that red material and return the
-    appropriate boolean """
 
+def create_setter(data_field, value_key, validator=None):
     data = getattr(bpy.data, data_field)
 
     def fn(self, value):
         if value == "":
-            del self[value_key]
+            self[value_key] = 0
 
         else:
             ob = data.get(value, None)
@@ -230,6 +266,18 @@ def create_setter(data_field, value_key, validator=None):
                     valid = validator(ob)
 
                 if valid:
+                    ob_hash = hash(ob)
+                    expected_hash = ID_TO_HASH[data_field].get(ob.id, None)
+
+                    # the object is new, and doesn't have an entry in the hash
+                    # lookup.  it is entirely possible that this is a duplicated
+                    # object and it shares its id with other objects.  so let's
+                    # re-evaluate its id
+                    if ob_hash != expected_hash:
+                        ob["id"] = 0
+                        ID_TO_HASH[data_field][ob.id] = ob_hash
+                        HASH_TO_NAME[data_field][ob_hash] = ob.name
+
                     self[value_key] = ob.id
 
     return fn
@@ -244,37 +292,77 @@ def _create_id_property(field_name):
         kwargs["get"] = create_getter(field_name, value_key)
         kwargs["set"] = create_setter(field_name, value_key, validator)
 
-        return p.StringProperty(*args, **kwargs)
+        payload = {
+            "field_name": field_name,
+        }
+        kwargs["description"] = json.dumps(payload)
+
+        prop = p.StringProperty(*args, **kwargs)
+        return prop
+
     return fn
 
 
-IDProperty = _create_id_property("objects")
-GroupIDProperty = _create_id_property("groups")
+for col_name, type_name in SUPPORTED_COLLECTIONS:
+    prop_name = type_name + "IDProperty"
+    globals()[prop_name] = _create_id_property(col_name)
 
-    
 
+
+def load_file(_=None):
+    for col_name, _ in SUPPORTED_COLLECTIONS:
+        id_to_hash = {}
+        hash_to_name = {}
+
+        ID_TO_HASH[col_name] = id_to_hash
+        HASH_TO_NAME[col_name] = hash_to_name
+
+        col = getattr(bpy.data, col_name)
+        all_obs = sorted(list(col), key=lambda ob: ob.name, reverse=True)
+
+        for ob in all_obs:
+            # on load, if we encounter an object with a dup id.  unset it and let it
+            # regenerate as a unique id
+            if ob.id in id_to_hash:
+                ob["id"] = 0
+
+            id_to_hash[ob.id] = hash(ob)
+            hash_to_name[hash(ob)] = ob.name
+
+
+@handlers.persistent
 def register():
-    bpy.types.Object.id = p.IntProperty(name="unique id", get=get_ob_id)
-    bpy.types.Library.id = p.IntProperty(name="unique id",
-            get=_create_id_getter("libraries"))
-    bpy.types.Group.id = p.IntProperty(name="unique id",
-            get=_create_id_getter("groups"))
-    bpy.types.Scene.objects_id_counter = p.IntProperty(name="unique id counter", default=0)
-    bpy.types.Scene.libraries_id_counter = p.IntProperty(name="unique id counter", default=0)
-    bpy.types.Scene.groups_id_counter = p.IntProperty(name="unique id counter", default=0)
+    bpy.utils.register_class(SelectedToIdProperty)
+    bpy.utils.register_class(FindSelected)
+
+    for col_name, type_name in SUPPORTED_COLLECTIONS:
+        type = getattr(bpy.types, type_name)
+        type.id = p.IntProperty(name="unique id", get=_create_id_getter(col_name))
+
+        counter_name = col_name + "_id_counter"
+        setattr(bpy.types.Scene, counter_name,
+            p.IntProperty(name="unique id counter", default=1))
+
+
+    handlers.load_post.append(load_file)
+    load_file()
 
 
 def unregister():
-    del bpy.types.Object.id
-    del bpy.types.Library.id
-    del bpy.types.Group.id
-    del bpy.types.Scene.objects_id_counter
-    del bpy.types.Scene.libraries_id_counter
-    del bpy.types.Scene.groups_id_counter
+    bpy.utils.unregister_class(SelectedToIdProperty)
+    bpy.utils.unregister_class(FindSelected)
+
+    for col_name, type_name in SUPPORTED_COLLECTIONS:
+        type = getattr(bpy.types, type_name)
+        del type.id
+        counter_name = col_name + "_id_counter"
+        delattr(bpy.types.Scene, counter_name)
+
+    handlers.load_post.remove(load_file)
+
     
 try:
     unregister()
 except:
     pass
 register()
-
