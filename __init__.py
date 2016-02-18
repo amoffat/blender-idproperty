@@ -305,6 +305,7 @@ for col_name, type_name in SUPPORTED_COLLECTIONS:
 
 
 
+@handlers.persistent
 def load_file(_=None):
     for col_name, _ in SUPPORTED_COLLECTIONS:
         id_to_hash = {}
@@ -326,7 +327,6 @@ def load_file(_=None):
             hash_to_name[hash(ob)] = ob.name
 
 
-@handlers.persistent
 def register():
     bpy.utils.register_class(SelectedToIdProperty)
     bpy.utils.register_class(FindSelected)
