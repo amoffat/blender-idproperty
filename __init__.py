@@ -219,9 +219,10 @@ def _create_value_key(name):
 
 
 def create_getter(data_field, value_key):
-    data = getattr(bpy.data, data_field)
 
     def fn(self):
+        data = getattr(bpy.data, data_field)
+
         ob_id = self.get(value_key, None)
 
         id_to_hash = ID_TO_HASH[data_field]
@@ -246,9 +247,10 @@ def create_getter(data_field, value_key):
 
 
 def create_setter(data_field, value_key, validator=None):
-    data = getattr(bpy.data, data_field)
 
     def fn(self, value):
+        data = getattr(bpy.data, data_field)
+
         if value == "":
             self[value_key] = 0
 
