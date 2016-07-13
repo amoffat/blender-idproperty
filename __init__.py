@@ -38,7 +38,7 @@ bl_info = {
 property to another object, even if that object changes its name.",
     "category": "Object",
     "author": "Andrew Moffat",
-    "version": (1, 2),
+    "version": (1, 2, 1),
     "blender": (2, 7, 6)
 }
 
