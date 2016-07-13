@@ -326,6 +326,12 @@ def load_file(_=None):
             id_to_hash[ob.id] = hash(ob)
             hash_to_name[hash(ob)] = ob.name
 
+def load_file_shim(_=None):
+    """ an ugly shim for calling load_file() "immiediately", which accesses
+    bpy.data (typically not allowed in an addon's register()) """
+    handlers.scene_update_pre.remove(load_file_shim)
+    load_file()
+
 
 def register():
     bpy.utils.register_class(SelectedToIdProperty)
@@ -339,9 +345,8 @@ def register():
         setattr(bpy.types.Scene, counter_name,
             p.IntProperty(name="unique id counter", default=1))
 
-
     handlers.load_post.append(load_file)
-    load_file()
+    handlers.scene_update_pre.append(load_file_shim)
 
 
 def unregister():
@@ -356,9 +361,10 @@ def unregister():
 
     handlers.load_post.remove(load_file)
 
-    
-try:
-    unregister()
-except:
-    pass
-register()
+
+if __name__ == "__main__":
+    try:
+        unregister()
+    except:
+        pass
+    register()
